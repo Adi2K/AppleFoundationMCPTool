@@ -5,6 +5,7 @@
 //
 import MCP
 import Foundation
+import AnyLanguageModel
 
 // MARK: - JSON Schema Keys
 private enum JSONSchemaKey: String, CustomStringConvertible {

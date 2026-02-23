@@ -61,13 +61,11 @@ struct InteractiveChat {
         if let serverURL = URL(string: "http://127.0.0.1:8080/mcp") {
             do {
                 mcpBridge = MCPToolBridge(serverURL: serverURL)
-                let tools : [any Tool]
+                let tools : [any AnyLanguageModel.Tool]
                 if type(of:model) == SystemLanguageModel.self {
-                    var toolsLeft = 5 // Only convert the first tools - Apple models context size is limited
-                    tools = try await mcpBridge!.connectAndDiscoverTools() { _ in // we don't need the tool parameter
-                        toolsLeft  = toolsLeft - 1
-                        return toolsLeft >= 0
-                    }
+                    // Only use the first 5 tools - Apple models context size is limited
+                    let allTools = try await mcpBridge!.connectAndDiscoverTools()
+                    tools = Array(allTools.prefix(5))
                 } else {
                     tools = try await mcpBridge!.connectAndDiscoverTools()
                 }
