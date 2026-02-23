@@ -1,131 +1,303 @@
 # AppleFoundationMCPTool
 
-A Swift package that acts as a dynamic bridge between Apple's `FoundationModels` framework (or `AnyLanguageModel`)and any server implementing the [Model Context Protocol (MCP)](https://modelcontextprotocol.io).
+A Swift package that bridges [Model Context Protocol (MCP)](https://modelcontextprotocol.io) servers to [AnyLanguageModel](https://github.com/mattt/AnyLanguageModel)'s `Tool` protocol. Connect any MCP server and its tools become available to any language model — OpenAI, MLX, Ollama, Apple's on-device models, and more.
 
-> **A Note on This Project**
-> 
-> This project was largely developed by AI agents as a technical demonstration of integrating Apple's `FoundationModels` framework with the Model Context Protocol (MCP).
-> 
-> While functional, it should be considered a proof-of-concept rather than a production-ready solution. The practical utility is currently limited by the context size of the models available in the `FoundationModels` framework, which can make it challenging for the model to effectively use tools with complex input schemas or lengthy descriptions.
-    Switching to `AnyLanguageModel` fixes this problem that allowing bigger models
+## How It Works
 
-## Overview
+```
+┌─────────────────┐      ┌──────────────────────┐      ┌────────────────┐
+│  MCP Server      │◄────►│  AppleFoundationMCP   │◄────►│  AnyLanguage   │
+│  (any server)    │      │  ToolBridge           │      │  ModelSession  │
+│                  │      │                       │      │                │
+│  Tools:          │      │  Discovers tools,     │      │  Model calls   │
+│  - get_weather   │      │  converts schemas,    │      │  tools auto-   │
+│  - search_web    │      │  bridges calls        │      │  matically     │
+│  - run_query     │      │                       │      │                │
+└─────────────────┘      └──────────────────────┘      └────────────────┘
+```
 
-With the introduction of new on-device AI capabilities in macOS 26.0, Apple's `FoundationModels` framework provides a powerful way to interact with large language models. This project enables that new framework to communicate with a broader ecosystem of tools and servers by leveraging the open-standard Model Context Protocol.
-
-`AppleFoundationMCPTool` discovers tools available on an MCP server at runtime and dynamically creates corresponding `FoundationModels.Tool` objects. This allows an LLM within a `FoundationModels` session to see and execute external tools without needing to know their specifics at compile time.
-
-## Features
-
-- **Dynamic Tool Bridging**: Automatically discovers and wraps MCP tools for use with `FoundationModels`.
-- **Flexible Connections**: Supports connecting to MCP servers via two methods:
-    - **HTTP/SSE**: Connects to a remote MCP server at a given URL.
-    - **Stdio**: Launches a local MCP server executable and communicates with it over standard input/output.
-- **Process Management**: Automatically manages the lifecycle of the server process when using a stdio connection.
-- **Modern & Type-Safe**: Built with modern Swift concurrency (`async/await`) and leverages the latest `FoundationModels` APIs.
+1. `MCPToolBridge` connects to an MCP server (HTTP or stdio)
+2. It discovers available tools and converts their JSON schemas to `GenerationSchema`
+3. Each tool is wrapped as a `DynamicMCPTool` conforming to AnyLanguageModel's `Tool` protocol
+4. Pass these tools to a `LanguageModelSession` — the model can now call them automatically
 
 ## Requirements
 
-- macOS 26.0+
-- Swift 6.0+
-- An MCP-compliant server or server executable.
+- macOS 26.0+ / iOS 26.0+
+- Swift 6.2+
+- An MCP-compliant server
 
-## Usage
+## Installation
 
-The primary entry point for this library is the `MCPToolBridge` class.
-
-### 1. Add the Package Dependency
-
-Add the following to your `Package.swift` file:
+Add AppleFoundationMCPTool to your `Package.swift`. Since this library depends on AnyLanguageModel, you must also declare AnyLanguageModel as a direct dependency **with the traits you need** (e.g. MLX, CoreML).
 
 ```swift
-dependencies: [
-    .package(url: "https://github.com/your-username/AppleFoundationMCPTool.git", from: "1.0.0")
-]
-```
+// swift-tools-version: 6.2
+import PackageDescription
 
-Then add the dependency to your target:
-
-```swift
-.target(
-    name: "YourTarget",
+let package = Package(
+    name: "MyApp",
+    platforms: [.macOS(.v26), .iOS(.v26)],
     dependencies: [
-        "AppleFoundationMCPTool"
+        // 1. AnyLanguageModel — declare with YOUR traits
+        .package(
+            url: "https://github.com/mattt/AnyLanguageModel.git",
+            from: "0.7.1",
+            traits: ["MLX"]  // Add traits you need: "MLX", "CoreML", "Llama"
+        ),
+        // 2. The MCP bridge
+        .package(
+            url: "https://github.com/Adi2K/AppleFoundationMCPTool.git",
+            from: "0.7.1"
+        ),
+    ],
+    targets: [
+        .executableTarget(
+            name: "MyApp",
+            dependencies: [
+                .product(name: "AnyLanguageModel", package: "AnyLanguageModel"),
+                "AppleFoundationMCPTool",
+            ]
+        ),
     ]
 )
 ```
 
-### 2. Initialize the Bridge
+### Why declare AnyLanguageModel separately?
 
-You can initialize the `MCPToolBridge` in one of two ways, depending on your server setup.
+AppleFoundationMCPTool depends on AnyLanguageModel but intentionally does **not** specify any traits. Swift Package Manager traits are controlled by the **consuming application**, not intermediate libraries. This means:
 
-#### Option A: Connect to an HTTP Server
+- AppleFoundationMCPTool works with all model backends — it only uses the base `Tool` and `GeneratedContent` APIs
+- **You** choose which backends to enable by specifying traits on your own AnyLanguageModel dependency
+- Both packages resolve to the same version of AnyLanguageModel — no duplication
 
-Use this method if you have an MCP server running and listening on a specific URL.
+If you forget to declare AnyLanguageModel with traits, everything compiles, but only `SystemLanguageModel` and API-based models (OpenAI, Anthropic, Gemini, Ollama) are available. MLX/CoreML/Llama models require their respective traits.
 
-```swift
-import AppleFoundationMCPTool
-import Foundation
+## Quick Start
 
-let serverURL = URL(string: "http://127.0.0.1:8000/mcp")!
-let bridge = MCPToolBridge(serverURL: serverURL)
-```
-
-#### Option B: Launch a Local Executable (Stdio)
-
-Use this method to have the bridge launch and manage a local MCP server executable, communicating with it over stdin/stdout.
+### Connect to an HTTP MCP server
 
 ```swift
 import AppleFoundationMCPTool
 
-let serverPath = "/path/to/your/mcp_server_executable"
-let bridge = MCPToolBridge(executablePath: serverPath)
-```
+let bridge = MCPToolBridge(serverURL: URL(string: "http://127.0.0.1:8080/mcp")!)
+let tools = try await bridge.connectAndDiscoverTools()
 
-### 3. Connect and Use Tools
+// Use with any AnyLanguageModel backend
+let model = OpenAILanguageModel(
+    baseURL: URL(string: "https://api.openai.com/v1")!,
+    apiKey: "sk-...",
+    model: "gpt-4o"
+)
+let session = LanguageModelSession(model: model, tools: tools)
+let response = try await session.respond(to: "What's the weather in Tokyo?")
+print(response.content)
 
-Once the bridge is initialized, you can connect to the server, discover its tools, and use them in a `FoundationModels` session.
-
-```swift
-import AppleFoundationMCPTool // Will also import FoundationModels or AnyLanguageModel, depending on how the Package was built
-
-// Assuming you have a SessionManager or similar class to manage the LLM session
-do {
-    // Connect to the server and get the dynamically created Apple Foundation tools
-    let tools = try await bridge.connectAndDiscoverTools()
-    print("Successfully discovered \(appleTools.count) tools.")
-
-    let session = LanguageModelSession(model: model, tools: tools) 
-
-    // You can now use the session, and the LLM will be able to see and call the tools.
-    let response = try await session.prompt("Use the 'add' tool to calculate 5 + 7.")
-    print(response)
-
-} catch {
-    print("An error occurred: \(error.localizedDescription)")
-}
-
-// Don't forget to disconnect when you're done.
-// This will also terminate the server process if it was launched by the bridge.
 await bridge.disconnect()
 ```
 
-## Example Targets
+### Launch a local MCP server via stdio
 
-This project includes two executable targets to demonstrate its functionality.
+```swift
+let bridge = MCPToolBridge(
+    executablePath: "/usr/local/bin/my-mcp-server",
+    arguments: ["--port", "disabled"]
+)
+let tools = try await bridge.connectAndDiscoverTools()
 
-### `AppleFoundationMCPToolChat` (Recommended Example)
+// Use with MLX (requires "MLX" trait in Package.swift)
+let model = MLXLanguageModel(modelId: "mlx-community/Qwen3-8B-4bit")
+let session = LanguageModelSession(model: model, tools: tools)
+let response = try await session.respond(to: "Search for recent news about Swift")
+print(response.content)
 
-This is a fully interactive command-line chat application that demonstrates the end-to-end functionality of the bridge. It connects to an MCP server, registers the discovered tools, and allows you to chat with an LLM that can use those tools.
+await bridge.disconnect()
+```
 
-#### How to Run
+### Filter tools
 
-1.  **Modify `main.swift`**: Open `Sources/AppleFoundationMCPToolChat/main.swift` and configure the `MCPToolBridge` initialization to point to your MCP server (either via URL or executable path).
-2.  **Run from the command line**:
-    ```sh
-    swift run AppleFoundationMCPToolChat
-    ```
+Some models have limited context windows. You can filter which tools are exposed:
 
-### `AppleFoundationMCPToolExample`
+```swift
+let tools = try await bridge.connectAndDiscoverTools { mcpTool in
+    // Only include specific tools
+    ["get_weather", "search"].contains(mcpTool.name)
+}
+```
 
-This target contains various conceptual code snippets. It is less of a working example and more of a scratchpad that shows different ways the library components could be used. For a practical, working demonstration, please refer to the `AppleFoundationMCPToolChat` example.
+### Use a pre-configured MCP client
+
+For advanced scenarios (custom auth, logging, proxies), create your own `MCP.Client` and pass it in:
+
+```swift
+import MCP
+
+let transport = HTTPClientTransport(endpoint: myURL)
+let client = Client(name: "MyApp", version: "1.0.0")
+try await client.connect(transport: transport)
+
+let bridge = MCPToolBridge(client: client)
+let tools = try await bridge.connectAndDiscoverTools()
+```
+
+### Track which tools came from which server
+
+When connecting multiple MCP servers, use the `tools` property to track provenance:
+
+```swift
+let weatherBridge = MCPToolBridge(serverURL: weatherServerURL)
+let dbBridge = MCPToolBridge(serverURL: databaseServerURL)
+
+try await weatherBridge.connectAndDiscoverTools()
+try await dbBridge.connectAndDiscoverTools()
+
+// Each bridge knows its own tools
+let weatherTools = await weatherBridge.tools   // [DynamicMCPTool]
+let dbTools = await dbBridge.tools             // [DynamicMCPTool]
+
+// Combine for the session
+let allTools: [any Tool] = weatherTools + dbTools
+let session = LanguageModelSession(model: model, tools: allTools)
+```
+
+## Usage in an iOS App (SwiftUI)
+
+Here's a complete example for an iOS app using OpenAI with MCP tools:
+
+```swift
+import SwiftUI
+import AppleFoundationMCPTool
+
+@Observable
+@MainActor
+class ChatViewModel {
+    var messages: [(role: String, content: String)] = []
+    var isLoading = false
+
+    private var bridge: MCPToolBridge?
+    private var session: LanguageModelSession?
+
+    func connect() async {
+        do {
+            // Connect to your MCP server
+            let bridge = MCPToolBridge(serverURL: URL(string: "http://your-server:8080/mcp")!)
+            let tools = try await bridge.connectAndDiscoverTools()
+            self.bridge = bridge
+
+            // Create a session with tools
+            let model = OpenAILanguageModel(
+                baseURL: URL(string: "https://api.openai.com/v1")!,
+                apiKey: ProcessInfo.processInfo.environment["OPENAI_API_KEY"] ?? "",
+                model: "gpt-4o"
+            )
+            self.session = LanguageModelSession(model: model, tools: tools)
+        } catch {
+            messages.append(("system", "Failed to connect: \(error.localizedDescription)"))
+        }
+    }
+
+    func send(_ text: String) async {
+        guard let session else { return }
+        messages.append(("user", text))
+        isLoading = true
+
+        do {
+            let response = try await session.respond(to: text)
+            messages.append(("assistant", response.content))
+        } catch {
+            messages.append(("system", "Error: \(error.localizedDescription)"))
+        }
+
+        isLoading = false
+    }
+
+    func disconnect() async {
+        await bridge?.disconnect()
+        bridge = nil
+        session = nil
+    }
+}
+
+struct ChatView: View {
+    @State private var viewModel = ChatViewModel()
+    @State private var input = ""
+
+    var body: some View {
+        VStack {
+            ScrollView {
+                ForEach(Array(viewModel.messages.enumerated()), id: \.offset) { _, message in
+                    HStack {
+                        if message.role == "user" { Spacer() }
+                        Text(message.content)
+                            .padding(8)
+                            .background(message.role == "user" ? Color.blue.opacity(0.2) : Color.gray.opacity(0.2))
+                            .cornerRadius(8)
+                        if message.role != "user" { Spacer() }
+                    }
+                }
+            }
+
+            HStack {
+                TextField("Message", text: $input)
+                    .textFieldStyle(.roundedBorder)
+                Button("Send") {
+                    let text = input
+                    input = ""
+                    Task { await viewModel.send(text) }
+                }
+                .disabled(input.isEmpty || viewModel.isLoading)
+            }
+            .padding()
+        }
+        .task { await viewModel.connect() }
+    }
+}
+```
+
+## API Reference
+
+### `MCPToolBridge` (actor)
+
+The main entry point. Connects to an MCP server and produces `DynamicMCPTool` instances.
+
+| Initializer | Description |
+|---|---|
+| `init(connection: MCPConnection)` | Connect via `.http(serverURL:)` or `.stdio(executablePath:arguments:)` |
+| `init(serverURL: URL)` | Shorthand for HTTP connection |
+| `init(executablePath:arguments:)` | Shorthand for stdio connection |
+| `init(client: Client)` | Use a pre-configured MCP client |
+
+| Method / Property | Description |
+|---|---|
+| `connectAndDiscoverTools(_:)` | Connects and returns discovered tools. Optional filter closure. |
+| `disconnect()` | Disconnects client and terminates server process if applicable. |
+| `tools: [DynamicMCPTool]` | The tools from the most recent `connectAndDiscoverTools()` call. |
+
+### `DynamicMCPTool` (struct, conforms to `Tool`)
+
+A single MCP tool wrapped for use with AnyLanguageModel. You don't create these directly — `MCPToolBridge` creates them.
+
+| Property | Type | Description |
+|---|---|---|
+| `name` | `String` | The MCP tool name |
+| `description` | `String` | Natural language description |
+| `parameters` | `GenerationSchema` | Converted from the MCP tool's JSON Schema |
+
+`Arguments` is `GeneratedContent` — the model produces structured content that gets serialized to JSON and sent to the MCP server.
+
+## Known Limitations
+
+The `ValueSchemaConverter` that translates MCP JSON Schema to AnyLanguageModel's `DynamicGenerationSchema` handles common cases but has known gaps:
+
+- No `allOf`/`oneOf`/`not` composition operators
+- No `pattern` (regex), `minLength`/`maxLength` on strings
+- No `minimum`/`maximum` on numbers
+- No `additionalProperties` support
+- No `format` validation (email, uri, date-time)
+- Circular `$ref` references are silently unresolved
+
+These cover the vast majority of real-world MCP tool schemas. Complex schemas may fall back to a generic string parameter.
+
+## License
+
+MIT
