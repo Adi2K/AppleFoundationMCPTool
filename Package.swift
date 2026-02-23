@@ -1,12 +1,11 @@
 // swift-tools-version: 6.2
-// The swift-tools-version declares the minimum version of Swift required to build this package.
-
 import PackageDescription
 
 let package = Package(
     name: "AppleFoundationMCPTool",
     platforms: [
-        .macOS(.v26)
+        .macOS(.v26),
+        .iOS(.v26)
     ],
     products: [
         .library(
@@ -15,7 +14,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/modelcontextprotocol/swift-sdk", from: "0.11.0"),
-        .package(url: "https://github.com/mattt/AnyLanguageModel.git", from: "0.7.1"),
+        .package(url: "https://github.com/mattt/AnyLanguageModel", branch: "main"),
     ],
     targets: [
         .target(
